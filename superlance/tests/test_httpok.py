@@ -40,11 +40,12 @@ def make_connection(response, exc=None):
             self.hostport = hostport
 
         def request(self, method, path, headers):
-            if exc:
-                if exc is True:
-                    raise ValueError('foo')
-                else:
-                    raise exc.pop()
+            error = exc.pop() if isinstance(exc, list) and exc else exc
+            if isinstance(error, BaseException):
+                raise error
+            elif error:
+                raise ValueError('foo')
+
             self.method = method
             self.path = path
             self.headers = headers
@@ -65,7 +66,7 @@ class HTTPOkTests(unittest.TestCase):
     def _makeOnePopulated(self, programs, any=None, statuses=None, inbody=None,
                           eager=True, gcore=None, coredir=None,
                           response=None, exc=None, name=None,
-                          timeout=10, retry_time=0):
+                          timeout=10, retry_time=0, allowed_retries=0):
         if statuses is None:
             statuses = [200]
         if response is None:
@@ -85,6 +86,7 @@ class HTTPOkTests(unittest.TestCase):
             email='chrism@plope.com',
             sendmail='cat - > /dev/null',
             retry_time=retry_time,
+            allowed_retries=allowed_retries
             )
         httpok.stdin = StringIO()
         httpok.stdout = StringIO()
@@ -432,6 +434,60 @@ class HTTPOkTests(unittest.TestCase):
         mailed = prog.mailed.split('\n')
         self.assertEqual(mailed[1],
           'Subject: httpok [thinko]: http://foo/bar: bad status returned')
+
+    def test_retry_before_restart(self):
+        programs = ['foo', 'bar']
+        any = None
+        prog = self._makeOnePopulated(programs, any, exc=True, eager=False, allowed_retries=2)
+
+        prog.stdin.write('eventname:TICK len:0\n')
+        prog.stdin.seek(0)
+        prog.runforever(test=True)
+        lines = prog.stderr.getvalue().split('\n')
+        self.assertEqual(lines[-2], 'Allowed number of retries not exceeded, '
+                                    'will try again 2 more times.')
+
+        prog.stdin.write('eventname:TICK len:0\n')
+        prog.stdin.seek(0)
+        prog.runforever(test=True)
+        lines = prog.stderr.getvalue().split('\n')
+        self.assertEqual(lines[-2], 'Allowed number of retries not exceeded, '
+                                    'will try again 1 more times.')
+
+        prog.stdin.write('eventname:TICK len:0\n')
+        prog.stdin.seek(0)
+        prog.runforever(test=True)
+        new_lines = prog.stderr.getvalue().split('\n')[len(lines) - 1:]
+        self.assertEqual(new_lines[0], "Restarting selected processes ['foo', 'bar']")
+
+    def test_retry_success_reset_count(self):
+        programs = ['foo', 'bar']
+        any = None
+        prog = self._makeOnePopulated(programs, any, exc=[True, False, True],
+                                      eager=False, allowed_retries=1)
+
+        prog.stdin.write('eventname:TICK len:0\n')
+        prog.stdin.seek(0)
+        prog.runforever(test=True)
+        lines = prog.stderr.getvalue().split('\n')
+        self.assertEqual(lines[-2], 'Allowed number of retries not exceeded, '
+                                    'will try again 1 more times.')
+
+        prog.stdin.write('eventname:TICK len:0\n')
+        prog.stdin.seek(0)
+        prog.runforever(test=True)
+        new_lines = prog.stderr.getvalue().split('\n')
+        # nothing new is printed
+        self.assertListEqual(lines, new_lines)
+
+        prog.stdin.write('eventname:TICK len:0\n')
+        prog.stdin.seek(0)
+        prog.runforever(test=True)
+        new_lines = prog.stderr.getvalue().split('\n')
+        # new retry notice is printed
+        self.assertTrue(len(new_lines) > len(lines))
+        self.assertEqual(lines[-2], 'Allowed number of retries not exceeded, '
+                                    'will try again 1 more times.')
 
 if __name__ == '__main__':
     unittest.main()
